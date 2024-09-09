@@ -1,0 +1,320 @@
+---
+title: "Exercise report on Poisson regression"
+bibliography: references.bib
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+date: today
+author:
+    - Mélanie FOURNIER
+jupyter: python3
+---
+
+# Poisson regression
+
+The poisson model is as follow:
+
+$$
+y_i \sim Poi(\lambda(x_i))
+$$
+
+with $\lambda(x_i) = \exp(\beta_0+ \beta_1 x_{i_1} + \cdots + \beta_p x_{i_p}) = \exp(\beta^T x_i)$.
+
+The log likelihood function is given by
+
+$$
+l(y | \beta, x) = \sum_{i=1}^n [-\lambda(x_i) + y_i \log(\lambda(x_i))-\log(y_i!)].
+$$
+
+
+This log likelihood need to be maximized by setting its gradient to zero, that is
+
+$$
+f(\beta) = \nabla_{\beta} l(y|\beta, x) = 0
+$$
+
+
+The gradient can be calculated elementwise:
+
+$$
+\frac{\partial l}{\partial \beta_k} = \sum_{i=1}^n -x_{i_k} \lambda(x_i) + y_i x_{i_k}
+$$
+
+And to solve $f(\beta) = 0$, we can use Newton-Raphson iterations. The Jacobian of $f$ is defined elementwise by:
+
+$$
+\frac{\partial^2 l}{\partial \beta_k \beta_l} = \sum_{i=1}^n -x_{i_k}x_{i_l} \lambda(x_i)
+$$
+
+Note that this also gives the observed information matrix, which can be used to derive assymptotic confidence intervals for the parameters.
+
+
+
+```{python}
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import os as os
+from scipy.special import factorial
+from scipy.stats import norm , chi2
+```
+
+We create a python object defining the model, with functions that determine the log likelihood and its derivatives with regard to the parameters. Then, Newton-Raphson iterations can be used to maximize this likelihood.
+
+```{python}
+class PoissonModel():
+  def __init__(self,x,y):
+    """
+    Object to define a Poisson model.
+
+    Input:
+    - x (np.ndarray), a two dimensional array of dimension (n,p). Note that a 1 column need to be present to account for the intercept
+    - y (np.ndarray), the label vector
+    """
+    self.n , self.p = np.shape(x)
+    self.beta = np.zeros(self.p)
+    self.x = x
+    self.y = y
+    pass
+
+  def set_beta(self,beta):
+    """
+    Used to set beta. Some useful variable are also recomputed automatically as they appear multiple time when using the other functions, so we avoid recomputing them each time.
+    In particular, lambda(x_i) is recomputed.
+    """
+    self.beta = beta
+    xbeta = self.x@self.beta
+    self.xbeta = xbeta
+    self.lmbd = np.exp(xbeta)
+
+
+  def poisson_loglik(self):
+    """
+    Compute the log likelihood for the current value of beta
+    """
+    logy_fact = np.log(factorial(self.y))
+    loglik = np.sum(-self.lmbd + self.y*self.xbeta - logy_fact)
+    self.loglik = loglik
+    return loglik
+
+  def grad_loglik(self):
+    """
+    Compute the gradient of the log likelihood for the current value of beta
+    """
+    grad_loglik = np.zeros(self.p)
+    for k in range(self.p):
+      x_k = self.x[:,k]
+      grad_loglik[k] = np.sum(-x_k * self.lmbd) + np.sum(x_k * self.y)
+    self.F = grad_loglik
+    return self.F
+
+  def grad_loglik2(self):
+    #Uses finite differences to compute the gradient of the log likelihood
+    grad_loglik = np.zeros(self.p)
+    eps = 1e-5
+    beta_init = self.beta
+    loglik_init = self.poisson_loglik()
+    for k in range(self.p):
+      beta = np.copy(beta_init)
+      beta[k] += eps
+      self.set_beta(beta)
+      loglik_fd = self.poisson_loglik()
+      grad_loglik[k] = (loglik_fd - loglik_init) / eps
+      self.set_beta(beta_init)
+    self.F = grad_loglik
+    return grad_loglik
+
+
+  def jac(self):
+    F_prime = np.zeros((self.p,self.p))
+    F_prime2 = np.zeros((self.p,self.p))
+    for l in range(self.p):
+      for k in range(self.p):
+        x_k = self.x[:,k]
+        x_l = self.x[:,l]
+        F_prime[l,k] = np.sum(-x_k*x_l*self.lmbd)
+    self.F_prime = F_prime
+    return F_prime
+
+
+
+  def newton_iter(self):
+    F_prime = self.jac()
+    F = self.grad_loglik()
+    delta = np.linalg.solve(F_prime,F)
+    newbeta = self.beta - delta
+    self.set_beta(newbeta)
+    return newbeta , delta
+
+  def fit(self):
+    for i in range(50):
+      beta , delta = self.newton_iter()
+      if(np.linalg.norm(delta)<1e-8):
+        print('Convergence attained')
+        return self.beta
+    print('Newtons method may not have converged')
+    return self.beta
+
+  def predict(self,x_predict):
+    lmbda_pred = np.exp(self.beta@x_predict)
+    generated_obs = np.random.poisson(lmbda_pred,1)[0]
+    return lmbda_pred, generated_obs
+
+  def _covariance(self):
+    """
+    Compute the assymptotic variance covariance matrix for the current beta
+    """
+    obs_fish_matrix = - self.jac()
+    self.var = np.linalg.inv(obs_fish_matrix)
+    return self.var
+
+  def get_CI_normal(self,alpha):
+    """
+    Get the confidence interval for the parameter, at level alpha
+    """
+    var = self._covariance()
+    var_diag = np.diag(var) #Extract the diagonal
+    plus_min = norm.ppf(1-alpha/2) * np.sqrt(var_diag/self.n)
+    self.upr = self.beta + plus_min
+    self.lwr = self.beta - plus_min
+    print(f'Calculating the confidence interval at level {alpha} using the normal approximation:')
+    for i in range(self.p):
+      print(f'CI for beta_{i}: [{self.lwr[i]},{self.upr[i]}]')
+
+  def profile_likelihood_plot(self,k,lower=0,upper=100,alpha = 0.05):
+    """
+    Plot the profile likelihood for beta_k
+    """
+    beta_init = np.copy(self.beta) #Saving it
+    new_beta = np.copy(self.beta)
+    initial_loglik = self.poisson_loglik() #For likelihood ratio test
+    beta_k_list = np.linspace(lower,upper,100)
+    prof_loglik_list = np.zeros_like(beta_k_list)
+    for i , beta_k in enumerate(beta_k_list):
+      new_beta[k] = beta_k
+      self.set_beta(new_beta)
+      prof_loglik_list[i] = self.poisson_loglik()
+    self.set_beta(beta_init)
+
+    max_deviance = chi2.ppf(1-alpha,1) #Chi square inverse cdf with one degree of freedom
+    loglik_threshold = initial_loglik-max_deviance/2 #Likelihood threshold for Cider
+    left_side_idx = np.argmax(beta_k_list  > self.beta[k])
+    left_side_loglik = prof_loglik_list[:left_side_idx] #Value of the likelihood for beta below one maximizing it
+    right_side_loglik = prof_loglik_list[left_side_idx-1:]
+    right_side_betak = beta_k_list[left_side_idx-1:]
+
+    idx_left= (np.abs(left_side_loglik - loglik_threshold)).argmin()
+    lwr = beta_k_list[idx_left]
+    idx_right = (np.abs(right_side_loglik - loglik_threshold)).argmin()
+    upr = right_side_betak[idx_right]
+
+    print(f'Profile likelihood based confidence interval at level {alpha} for beta_{k}:')
+    print(f'[{lwr},{upr}]')
+    
+    #Plotting
+    plt.plot(beta_k_list,prof_loglik_list)
+    
+    plt.axhline(initial_loglik - max_deviance/2,linestyle = '--')
+    plt.axvline(beta_init[k],linestyle = '--')
+    plt.axvline(lwr,linestyle='--',color='red')
+    plt.axvline(upr,linestyle='--',color = 'red')
+    plt.xlabel(f'Beta_{k}')
+    plt.ylabel(f'Profile likelihood')
+```
+
+# Testing on the bird count data
+
+The bird count data consists of birds count from one site from the year 1999 to the year 2012, thus containing 13 samples.
+
+The variable of interest are:
+
+- count: the bird count for each year
+- yr: the years, from 1999 to 2012.
+
+
+We fit a Poisson regression for the bird count, using the year as a predictor variable.
+
+$$
+y \sim Poi(\lambda(\text{year}) = \exp(\beta_0 + \beta_1 \text{year}))
+$$
+
+
+```{python}
+df = pd.read_csv('bird_count.csv')
+df[['count','yr']].describe(percentiles=[0.5])
+```
+
+
+```{python}
+df['Ones'] = 1 #Adding an intercept
+x = df[['Ones','yr']].to_numpy()
+y = df['count'].to_numpy()
+
+bird_model = PoissonModel(x,y)
+bird_model.set_beta(np.array([0,0]))
+bird_model.fit()
+log_lik = bird_model.poisson_loglik()
+print(f'Log likelihood: {log_lik}')
+print(f'Beta = {bird_model.beta}')
+
+```
+
+
+## Uncertainty approximations
+
+There may be some mistakes here but I don't have the time to double check. In particular, there is a strong difference in results between the two approaches, which I find a bit strange.
+
+### Assymptotic normal approach
+
+The normal approximation of the likelihood function is very much a stretch with so few samples. Regardless, we can compute the approxomate confidence intervals: 
+
+```{python}
+bird_model.get_CI_normal(0.05)
+```
+
+
+### Profile likelihood based approach
+
+The profile likelihood approach yields much tighter confidence intervals for the parameters. We make the approximation that the deviance function is $\chi^2(1)$ distributed when calculating the profile likelihoods. Given the low sample size, this may not hold very well.
+
+```{python}
+#| fig-cap: Profile likelihood for the intercept $\beta_0$.
+bird_model.profile_likelihood_plot(0,66.5,67.7)
+```
+
+```{python}
+#| fig-cap: Profile likelihood for the intercept $\beta_1$.
+bird_model.profile_likelihood_plot(1,-0.0326,-0.0322)
+```
+
+
+
+# Generating samples
+
+Now that the model is fit, we can generate some samples for each years. In the table below, the average count is shown as well as the value of lambda associated with the year. There is quite a bit of variance due to how few observations are generated. 
+
+```{python}
+
+np.random.seed(1234)
+year_list = np.repeat(np.arange(1999,2012),3) #Generate 3 observations for each year
+count_list = np.zeros_like(year_list)
+lambda_list = np.zeros_like(year_list,dtype=float) #Lambda hat for the year
+
+for i , year in enumerate(year_list):
+  lmbd , count = bird_model.predict(np.array([1,year]))
+  count_list[i] = count
+  lambda_list[i] = lmbd
+
+d = {'yr': year_list , 'count':count_list,'lmbd_hat':lambda_list}
+df_generated = pd.DataFrame(d)
+df_generated.groupby('yr').mean()
+```
+
+And saving the results:
+
+```{python}
+#Saving it
+
+df_generated.to_csv('generated_birds.csv',index = False)
+```

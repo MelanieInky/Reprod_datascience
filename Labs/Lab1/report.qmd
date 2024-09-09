@@ -1,0 +1,267 @@
+---
+title: "Exercise report on simple linear regression"
+bibliography: references.bib
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+date: today
+author:
+    - Mélanie FOURNIER
+jupyter: python3
+---
+
+
+```{python}
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+```
+
+
+# Local simple regression
+
+The goal of a local regression is to do a linear regression only a subset of samples with the observation $x_i$  that are close to a given value $x_0$. 
+
+The observations, denoted by $x_1,\dots x_k$ are also given a weight $w_i$, $i=1, \dots, k$ dependent on how close to $x_0$ the value is. That is the observations closest to $x_0$ are usually given a higher weight.
+
+
+
+## Weighted least square.
+
+The weighted least square problem is to find the parameter vector $\beta$ that minimizes the weighted least square problem
+
+$$
+\hat{\beta} = \text{argmin}_\beta \sum_{i=1}^n w_i (y_i - (\beta_0 + \beta_1 x_1 + \dots \beta_p x_p))^2
+$$
+
+The solution is given in [@wls]:
+
+$$
+\beta_0 = \bar{y_w} - \beta_1 \bar{x_w}
+$$
+
+and 
+
+$$
+\beta_1 = \frac{\sum w_i(x-\bar{x}_w)(y_i-\bar{y}_w)}{\sum w_i(x-\bar{x}_w)^2},
+$$
+
+where $\bar{x}_w$ and $\bar{y}_w$ are the weighted means of respectively the $x$ and the $y$ vectors. Setting all the weights to the same value yields on ordinary least square problem, for which the variance-covariance matrix for the estimator beta is given by: [@Larry]
+
+$$
+V[\hat{\beta}] = \hat{\sigma}^2(\mathbf{X}^T \mathbf{X})^{-1}
+$$
+
+where $\mathbf{X}$ is the design matrix, and $\hat{\sigma}^2 = \frac{\sum e_i^2}{n-2}$ in the simple linear regression case. In the weighted case, this matrix has an expression that is a bit more complicated so this is not implemented in the code. 
+
+
+```{python}
+def weighted_least_square(x,y,w):
+    """
+    Solve the simple weighted least square problem that minimizes
+    sum w_i(y_i - beta_0 - beta_1 * x_i)^2
+
+    w is the weight vector
+
+    Returns the beta vector. 
+    """
+    x_bar = np.average(x,weights=w)
+    y_bar = np.average(y,weights=w)
+    beta_1 = np.inner(w*(x-x_bar),y-y_bar) / np.inner(w*(x-x_bar),x-x_bar)
+    beta_0 = y_bar - beta_1*x_bar
+    beta = np.array([beta_0, beta_1])
+    var_beta = None #TODO
+    return beta, var_beta
+
+def ols(x,y):
+    """
+    Perform the ordinary least square operation that minimizes
+    sum w_i(y_i - beta_0 - beta_1 * x_i)^2.
+
+    Return beta,and the associated variance-covariance matrix
+    """
+    x_bar = np.mean(x)
+    y_bar = np.mean(y)
+    beta_1 = np.inner((x-x_bar),y-y_bar) / np.inner((x-x_bar),x-x_bar)
+    beta_0 = y_bar - beta_1 * x_bar
+    beta = np.array([beta_0,beta_1])
+
+    n = len(x)
+    resid = y - beta_0 - beta_1 * x
+    sigma_2 = 1/(n-2) * np.inner(resid,resid)
+    
+    X = np.vstack((np.ones(n),x)).T
+    var_beta = sigma_2 * np.linalg.inv(X.T@X)
+    return beta, var_beta
+
+```
+
+## Finding the nearest neighbours. 
+
+The following functions finds the indices of the k-nearest neighbours of the scalar $x_0$ in the vector $x$.
+
+```{python}
+#| fig-cap: "Testing of the function finding the k-th nearest neighbours of x0 (blue dashed line)"
+
+
+def nearest_neighbour(x0,x,k):
+    """
+    Return the indices of the k-nearest points to x0, assuming 1d array
+    """
+    dist = np.abs(x-x0)
+    dist_threshold = np.partition(dist,k-1)[k-1] #Get the value for the k'th lowest distance
+    return dist <= dist_threshold , dist
+
+
+np.random.seed(1234)
+x = np.random.rand(100)
+y = np.random.rand(100)
+
+x0 = 0.6
+k = 50
+
+neighbours_idx , dist = nearest_neighbour(x0,x,k)
+x_filtered = x[neighbours_idx]
+y_filtered = y[neighbours_idx]
+
+
+max_dist = np.max(np.abs(x_filtered-x0))
+
+
+plt.scatter(x,y)
+plt.scatter(x_filtered,y_filtered,color = 'red')
+plt.axvline(x0, linestyle = '--')
+plt.axvline(x0 + max_dist,color = 'red', linestyle = '--')
+plt.axvline(x0 - max_dist,color = 'red', linestyle = '--')
+```
+
+
+
+We can now find the values of $\beta_0$ and $\beta_1$ that fit the weighted least square problem, considering only the k'th closest values of $x_0$.
+
+```{python}
+def loess(x0_vect,x,y,k,weight = 'constant'):
+    """
+    Calculate the local regression at the values given by x0
+    Returns:
+     - pred: the vector of predicted values
+     - se: the vector of standard deviations for the expectation of the prediction
+    """
+    pred = np.zeros_like(x0_vect)
+    se = np.zeros_like(x0_vect)
+    for i, x0 in enumerate(x0_vect):
+        nhb_idx , d_all = nearest_neighbour(x0,x,k)
+        x_nhb = x[nhb_idx]
+        y_nhb = y[nhb_idx]
+        dist = d_all[nhb_idx] #Get the distance
+        if weight == 'constant':
+            beta, var_beta = ols(x_nhb,y_nhb)
+        elif weight == 'tricube': #See wikipedia
+            dist_sc = dist / np.max(dist)
+            w = (1-dist_sc**3)**3
+            beta , var_beta = weighted_least_square(x_nhb,y_nhb,w)
+        else:
+            raise NotImplementedError("Unknown or not implemented weigth method")
+        #Get the estimation, and its estimated variance
+        mu0 = beta[0] + beta[1]*x0
+        if var_beta is None: #If the variance is not calculated
+            pred[i] , se[i] = mu0 , None
+        else:
+            var_mu0 = var_beta[0,0] + var_beta[1,1]*x0**2+ 2*x0*var_beta[0,1] #Variance of $beta_0 + beta_1 x0$
+            pred[i], se[i] = mu0, np.sqrt(var_mu0)
+    return pred, se
+```
+
+
+The above can be tested on synthetic data.
+```{python}
+#| fig-cap: "Loess smoothing (k=30) with synthetic data. The red line represent the 95% confidence interval on $E[\\mu_0]$."
+x = np.arange(0,1,0.01)
+y = np.random.rand(len(x)) + np.cos(2*np.pi*x)
+k = 30 #Number of neighbours to consider
+
+def plot_loess(x,y,k,xlab='x',ylab='y'):
+    x_pred = np.linspace(np.min(x),np.max(x),100)
+    y_pred = np.zeros_like(x_pred)
+    var_pred = np.zeros_like(x_pred)
+    y_pred, se_pred = loess(x_pred,x,y,k,weight='constant')
+    plt.plot(x_pred,y_pred)
+    #Plot the 95% C.I for the expected value
+    plt.plot(x_pred,y_pred+1.96*se_pred,linestyle='--',color = 'red')
+    plt.plot(x_pred,y_pred-1.96*se_pred,linestyle='--',color = 'red')
+    plt.scatter(x,y)
+    plt.xlabel(xlab)
+    plt.ylabel(ylab)
+
+plot_loess(x,y,k)
+
+```
+
+Choosing lower values of $k$ yields a less smooth fit with higher variance.
+
+```{python}
+#| fig-cap: "Loess smoothing (k=15) with synthetic data. The red line represent the 95% confidence interval on $E[\\mu_0]$."
+k = 15
+plot_loess(x,y,k)
+```
+
+# Application to Air polution data set.
+
+The above functions can be applied to the Air pollution dataset. We only need the total age-adjusted mortality rate per 100,000 (MORT) and the % of families with income < $3000 (POOR) features
+
+```{python}
+#| fig-cap: "Loess smoothing (k=20) on the Air pollution dataset. The red line represent the 95% confidence interval on $E[\\mu_0]$."
+
+
+df = pd.read_csv('pollution_cleaneddata.csv')
+df2 = df[['MORT','POOR']]
+
+x = df2['POOR'].to_numpy()
+y = df2['MORT'].to_numpy()
+k= 20
+
+plot_loess(x,y,k,'Percent of families with poor income','Total age adjusted mortality rate per 100000')
+```
+
+In particular, a few predicted mortality rate for areas with 10, 18 and 25% of low income families are given below
+
+```{python}
+
+x0 = [10,18,25]
+
+mu, se = loess(x0,x,y,k)
+
+for i, x_0 in enumerate(x0):
+    print(f'Predicted average mortality rate per 100k for areas with {x_0} percent of families having low income: {mu[i]}\n with standard error {se[i]}. 95% C.I [{-1.96*se[i]+mu[i]},{1.96*se[i]+mu[i]}]')
+```
+
+In general, lower income areas experience a higher mortality rate. 
+
+
+Choosing a lower value of k makes for a more wiggly fit, we observe a bigger differente 
+```{python}
+#| fig-cap: "Loess smoothing (k=5) on the Air pollution dataset. The red line represent the 95% confidence interval on $E[\\mu_0]$."
+
+
+df = pd.read_csv('pollution_cleaneddata.csv')
+df2 = df[['MORT','POOR']]
+
+x = df2['POOR'].to_numpy()
+y = df2['MORT'].to_numpy()
+k= 5
+
+plot_loess(x,y,k,'Percent of families with poor income','Total age adjusted mortality rate per 100000')
+```
+
+
+```{python}
+
+x0 = [10,18,25]
+
+mu, se = loess(x0,x,y,k)
+
+for i, x_0 in enumerate(x0):
+
+    print(f'Predicted average mortality rate per 100k for areas with {x_0} percent of families having low income: {mu[i]}\n with standard error {se[i]}. 95% C.I [{-1.96*se[i]+mu[i]},{1.96*se[i]+mu[i]}]')
+```
