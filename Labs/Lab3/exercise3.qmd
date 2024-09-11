@@ -1,0 +1,187 @@
+---
+title: "Exercise report on mixture model"
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+date: today
+author:
+    - Mélanie FOURNIER
+---
+
+# Exercise 3 - Towel data set
+
+In this exercise we analyse the results of several experiments. The experiments are whether the inclusion of a message stating stating that most people reuse their towel in their hotel room made it more likely for guests to do so.
+
+The dataset has the following variables:
+
+-   Source: the particular experiment.
+-   AuthorName: the name of the authors of the experiment
+-   Experiment: Some of the author repeated their experiment at a later date. This variable indicates which experiment is which.
+-   Year: The year the experiment was performed.
+-   Group: control group (the guest received a message about the ecological aspect of reusing towel) or Social(the guest received the social norm message).
+-   Towel.Reuse: Whether the guest reused the towel or not
+-   Count: the number of guests this concerned.
+
+The relevant variables are Source, Group and Towel.Reuse.
+
+There are in total 7 experiments that have been carried out, with an average of 642 guests per experiment.
+
+```{r}
+#| echo: false
+#| output: false
+library(ggplot2)
+library(dplyr)
+library(kableExtra)
+library(lme4)
+library(tidyr)
+
+
+```
+
+```{r}
+#| tbl-cap: The data set
+df2 <- read.csv2('towelData.csv')
+head(df2) %>% kbl()
+```
+
+## Data visualization
+
+Without making a single model, we can visualize the results of each experiments.
+
+```{r}
+#| fig-cap: Towel reuse probability across the 7 experiments. One can see that there are a lot of changes in probability across experiment, and that the results are not the same across experiments.
+#| echo: false
+
+df_yes <- df2 %>% filter(Towel.Reuse == 'Yes') 
+df_no <- df2 %>% filter(Towel.Reuse == 'No') %>% 
+         select(c('Source','Group','Count'))
+
+df3 <- df_yes %>% 
+                  left_join(by = c('Source','Group'),df_no)
+df3 <- df3 %>% mutate('Reuse_prob' = Count.x/(Count.x +Count.y))
+
+df3 %>% ggplot(aes(x = Source,y = Reuse_prob, fill = Group,position = "dodge")) +
+             geom_col(position = "dodge")+ 
+            theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+            labs(y = 'Reuse probability')
+
+```
+
+We can see that there are quite a bit of variation in results across the experiments.
+
+One approach would be to agregate the results of every experiments together, but this would not take into account the heterogeneity between experiments.
+
+```{r}
+#| tbl-cap: By agregating all the experiments together, we can see that a bit more people reused their towel when the social norm message was used compared to control.
+df2 %>% group_by(Group,Towel.Reuse) %>% 
+  summarize(n = sum(Count)) %>% kbl()
+```
+
+## The model
+
+In order to account to the fact that each experiment is run independently, there is an in group effect that is present. For example, some hotels may have a clientele that is more receptive to social norm pressure than other. This is modeled as a random effect. The fixed effects consist only of an intercept and which groups the participants where in.
+
+The model is thus a general linear mixed model with a Bernoulli response variable: whether the towel was reused or not.
+
+$$
+y_i \sim \text{bernoulli}(p(x_i))
+$$
+
+with $logit(p(x_i)) = \beta_0 + \beta_1 \text{Group} + u_j$ where $u_j$ is a random effect taken from a normal distribution with a variance $\sigma^2$.
+
+The model is fit with both the frequentist and the Bayesian approach to compare the results.
+
+Some light re-coding of the variable is done to prepare them for the model:
+
+```{r}
+#Recoding for the model
+df <- df2 %>% mutate(Towel.Reuse = recode(Towel.Reuse,
+                                         'Yes' = 1,
+                                         'No' = 0))
+#Expanding every count to be their own observation.                               
+df <- df %>% uncount(Count)
+```
+
+```{r}
+#| echo: false
+#| output: false
+
+
+#Mean number of guests per experiement
+df %>% group_by(Source) %>% count() %>% ungroup() %>% summarize(mean = mean(n))
+```
+
+## Frequentist approach
+
+The model is fit in the frequentist approach with the glmer function available in the lme4 library.
+
+```{r}
+model <- glmer(Towel.Reuse ~ Group + (1| Source) ,data = df,family = binomial)
+summary(model)
+```
+
+The following code shows the 95% confidence intervals for the parameters.
+
+```{r}
+#| tbl-cap: Fitted parameters for the frequentist model
+estimates <- c(0.829,0.448,0.211)
+params <- bind_rows(model%>%
+                confint()%>%
+                as.data.frame(., rownames = rownames(.))%>% # convert matrix to dataframe
+                tibble::rownames_to_column(var = "parameter")%>% # convert rownames to variable
+                mutate('estimate' = estimates)) %>%
+                mutate('parameter' = c('sigma','beta_0','beta_1'))
+params %>% kbl(digits = 2)
+```
+
+The parameter $\beta_1$ is greater than 0 so there is an increased odd for guests to reuse their towel if a social norm message is shown to them. This results is statistically significant based on profile likelihood confidence intervals.
+
+The variance $\sigma$ for the random effect is quite high, showing that there can be quite a disparity between studies for guests to reuse their towels with different probabilities.
+
+## Bayesian approach
+
+A Bayesian model can also be fit. The model is fit with the brms packages. The prior are chosen by the brms package, with the exception of $\beta_1 \sim \mathcal{N}(0,0.3)$.
+
+```{r}
+#| output: false
+library(brms)
+
+prior <- prior("normal(0,0.3)",class = "b", coef = "GroupSocialNorm")
+model_bayes <- brm(Towel.Reuse ~ Group + (1| Source),
+                  data = df,family = bernoulli(link='logit'),
+                  chains = 4,
+                  cores = 4,
+                  backend = 'cmdstanr',
+                  sample_prior = 'yes',
+                  prior = prior,
+                  seed = 1234)
+```
+
+The posteriors mean estimate and a 95% credible interval are shown in the table below:
+
+```{r}
+#| tbl-cap: Posterior estimates for the parameters
+posterior_summary(model_bayes,variable = c('b_Intercept','b_GroupSocialNorm','sd_Source__Intercept')) %>% kbl(digits=3)
+```
+
+In particular, the credible interval for the social norm is $[0.047,0.348]$ with a mean of $0.196$. These corresponds to an odd ratio of $1.21$ with CI $[1.05,1.41]$. Based on this, we can assume that switching to a social norm based message had an effect on the behaviors of the guests.
+
+Standard plots for the model are shown here. In general, the chains show good mixing and the chains are stationary.
+
+```{r}
+#| fig-cap: Posterior distribution samples histogram on the left. Associated Markov chain on the right. Almost all sample in b_GroupSocialNorm are greater than 0, visually confirming that the social norm message had an effect.
+plot(model_bayes)
+```
+
+Compared to the hypothesis that $\beta_1 = 0$, we have a Bayes factor of 7.83, showing weak evidence in favor of the $\beta_1 \neq 0$ hypothesis.
+
+```{r}
+hyp_test <- hypothesis(model_bayes,"GroupSocialNorm=0")
+print(hyp_test)
+#The Bayes factor is then the inverse of the Evid.Ratio variable
+bayes_factor <- 1/hyp_test$hypothesis['Evid.Ratio']
+print(bayes_factor)
+```
+
+Both the Bayesian and the Frequentist models reach the same conclusion that there is an effect, albeit quite small, due to the inclusion of a social norm message in terms of towel reuse probability. The heterogeneity between studies is quite big, and was addressed by adding the random effect.
