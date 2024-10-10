@@ -1,0 +1,306 @@
+
+---
+title: "Exercise on data visualization"
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+date: today
+author:
+    - Mélanie FOURNIER
+---
+
+
+# Exercise on data visualization
+
+In this exercise, we use data curated by the tidy tuesday community. The dataset I chose is the [Great American Coffee Taste Test](https://github.com/rfordatascience/tidytuesday/blob/master/data/2024/2024-05-14/readme.md), which is data gathered by the youtuber [James Hoffmann](https://www.youtube.com/@jameshoffmann). I have not watched the video as of yet so this exploration of the data is done completely blind.  
+
+In this survey, participants were asked to blind taste 4 differents coffee and were asked about their experience with it, as well as their general preferences. There were 4052 participants, and a lot of questions where asked in the survey, leading to 57 variables, so here's a bit of general data before we start visualizing it a bit more. 
+
+This is also an exercise so we will focus on only some of the variable. Namely, we focus on the coffee drinking habits of participants rather than the taste test part of the survey. 
+
+
+We first load the necessary libraries and download the data.
+
+```{r}
+#| output: false
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(forcats)
+
+```
+
+```{r}
+#| output: false
+coffee_survey <- readr::read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2024/2024-05-14/coffee_survey.csv')
+
+```
+
+We may be interested in some general demographics first. The participants are mostly in the age range 25-34 years old, which is more representative of the demographics of James Hoffman's viewer than the average coffee drinker. 
+
+```{r}
+#Reorder the age as a factor
+coffee_survey <- coffee_survey %>% arrange(age) %>% mutate(age = factor(
+    age, 
+    levels = c("<18 years old",
+               "18-24 years old",
+               "25-34 years old",
+               "35-44 years old",
+               "45-54 years old",
+               "55-64 years old",
+               ">65 years old")))
+
+coffee_survey %>% group_by(age)  %>% summarise(count = n()) %>% mutate(percentage = count / sum(count) * 100) %>% knitr::kable(digits = 0)
+```
+
+The participants were asked about their coffee habit. One of these questions was what they usually added to their coffee. There are broadly speaking two majors additions one adds to their coffee: milk or equivalent substitute, and a sweetener. 
+
+
+Do people usually add some milk or alternative to their coffee? Let us first see if there is a difference by age:
+
+```{r}
+#Was the Milk or substitute case checked?
+coffee_survey <- coffee_survey  %>% mutate(milk = str_detect(additions, pattern = "Milk"))
+
+#Plotting!
+p <- coffee_survey %>% ggplot(aes(x = age, fill = milk)) + geom_bar(position = position_stack(reverse = TRUE)) 
+
+p
+ 
+```
+
+This is not a very good graph for the following reason.
+
+- The number of respondents for every age range is very different, which makes it difficult to compare one age to another.
+- The default color scheme is very nice, but we can use something a bit more inspired. 
+- The axis are labelled by default and the age overlap, making it very difficult to read.
+- Some people did not answer the survey question on either their age or their preference. This data can be useful in some cases, but in that kind of survey, it does not convey any additional information.
+-  Furthermore, there are only 20 participants that are in the <18  years old range, which is not a lot, compared to other age range, so the data may be non representative. 
+
+We first do a bit of work with the data
+
+```{r}
+#| output: false
+
+#Replace age by a shorter value, keeping the order.
+coffee_survey <- coffee_survey %>% mutate(age = factor(age , labels = str_replace_all(levels(age), "years old", "y.o")))
+
+#Replace true and false with more human readable sentences
+coffee_survey <- coffee_survey %>% mutate(milk = case_match(milk, FALSE ~ "Does not usually add milk", TRUE ~ "Usually adds milk or substitute"))
+
+#Getting the proportions instead
+coffee_milk <- coffee_survey %>% 
+    select(c(age,milk,expertise)) %>%
+    na.omit() %>%
+    filter(age != "<18 y.o") %>%
+    group_by(age,milk) %>%
+    summarise(count = n()) %>%
+    mutate(perc = count / sum(count)*100)
+```
+
+Then, we plot the figure, taking care in choosing our theme. The resulting graph shows that age does not play that much of a role in whether people enjoy coffee with milk or without.
+
+```{r}
+p <- coffee_milk %>% ggplot(aes(x = age, y = perc, fill = milk)) + geom_col(position = position_stack(reverse = TRUE)) 
+
+p + labs(title = "With Some Milk?",
+        subtitle = "% of participants who usually add milk or substitute to their coffee",
+         x = "",
+         y = "% of respondents") +
+    theme_minimal(base_size = 14) +
+    theme(legend.position = "top") + 
+    scale_fill_manual(values = c("#6F4E37", "#cfc29b")) +
+    guides(fill=guide_legend("")) +
+    theme(panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank())
+
+```
+
+The color scheme is chosen to be skeuomorphic, as a coffee with no milk has a...coffee color, while a coffee with milk has a creamy one. 
+
+What does play a role, on the other hand, is the self assessed expertise level of the participants, which was ranked on a 1-10 scale. Novices tend to like their coffee with milk, while experts tend like their coffee without. 
+
+
+```{r}
+
+coffee_milk2 <- coffee_survey %>% select(c(expertise,milk,expertise)) %>% na.omit() %>% group_by(expertise,milk) %>%  summarise(count = n()) %>% mutate(perc = count / sum(count)*100)
+
+p <- coffee_milk2 %>% filter(milk == "Does not usually add milk") %>% ggplot(aes(x = expertise, y = perc, fill = milk)) + geom_area() + geom_point()
+
+
+p + labs(title = "Experts don't add milk to their coffee",
+        subtitle = "Percentage of participants who usually drink their coffee with no milk or substitute",
+         x = "Expertise level",
+         y = "% of respondents") +
+    theme_bw(base_size = 14) +
+    scale_fill_manual(values = c("#6F4E37")) +
+    theme(
+        plot.subtitle = element_text(size = 12),
+        panel.background = element_rect(fill="#FDFBD4"),
+        legend.position = "none",
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank()) +
+    coord_cartesian(xlim = c(1, 10), ylim = c(0,100), expand = FALSE) + 
+    scale_x_continuous(breaks=seq(1,10,1)) #+ 
+    #geom_text(x=5.5, y=20, label="Without milk", size = 8, color = "grey10") +
+    #geom_text(x=5.5, y=80, label="With milk", size = 8, color = "grey10")
+ 
+```
+
+
+What about the how people brew their coffee. Do experts use a different brewing method than less experienced coffee enjoyer? This can be visualized but there is a bit of wrangling to do with the data.
+
+- The expertise levels are quite nice, but there are a lot of levels. For this reason, we compress these 9 levels to 3 levels: novice, intermediate and experts.
+- In the survey, there was two questions asked. "What brewing method do you use?"" which was a multiple choice question, and "What other method do you use?" which was a free text field. So we have to take that into account. For example, the aeropress is quite popular, but was not in the main question, so we account for that.
+
+
+```{r}
+coffee_survey <- coffee_survey %>% 
+                    mutate(exp = case_match(expertise,
+                        c(1,2,3,4) ~ "Novice",
+                        c(5,6,7) ~ "Intermediate",
+                        c(8,9,10) ~ "Expert"
+                        ))
+#A bit of a weird way to count, but it should work
+count_expertise <- coffee_survey %>% group_by(exp) %>% summarise(n = n())
+count_expertise <- count_expertise$n[1:3]
+n_expert <- count_expertise[1]
+n_intermediate <- count_expertise[2]
+n_novice <- count_expertise[3]
+
+
+#Remove the NAs and count the number of people in each expertise group
+coffee_brew <- coffee_survey %>% select(exp,brew) %>% na.omit()
+coffee_brew <- coffee_brew %>% group_by(exp) %>% mutate(n_exp = n())
+
+
+
+#Separate the brew to a longer format where each row
+#corresponds to a single brew,
+#Remove the other format, as it will be taken care of later
+coffee_brew <- coffee_brew %>% 
+    separate_longer_delim(brew,", ") %>%
+    ungroup() %>%
+    filter(brew != "Other")
+
+
+
+#There is a brew_other variable, where other brews are written,
+#so we take that into account
+moka_aero <- coffee_survey %>% select(exp, brew_other) %>%
+    mutate(moka = str_detect(brew_other,pattern = "(?i)moka|Mocha|Mokka")) %>%
+    mutate(aeropress = str_detect(brew_other,pattern = "(?i)aeropress"))
+
+moka <- moka_aero %>% 
+    filter(moka == TRUE) %>% 
+    select(exp) %>% 
+    na.omit() %>% 
+    mutate(brew = "Moka pot")
+
+aero <- moka_aero %>% 
+    filter(aeropress== TRUE) %>% 
+    select(exp) %>% 
+    na.omit() %>% 
+    mutate(brew = "Aeropress")
+
+
+other <- moka_aero %>% 
+    filter(aeropress == FALSE & moka == FALSE) %>% 
+    select(exp) %>% 
+    na.omit() %>% 
+    mutate(brew = "Other")
+
+
+coffee_brew <- coffee_brew %>%
+    add_row(moka) %>% 
+    add_row(aero) %>%
+    add_row(other)
+
+
+coffee_brew_percent <- coffee_brew %>% 
+    group_by(exp,brew) %>%
+    summarise(n = n()) %>%
+    na.omit() %>% 
+    group_by(exp) %>%
+    mutate(percent = case_match(exp,
+                                "Novice" ~ n/n_novice * 100,
+                                "Intermediate" ~ n/n_intermediate * 100,
+                                "Expert" ~ n/n_expert * 100))
+
+#Remove what follows (e.g ...) 
+coffee_brew_percent <- coffee_brew_percent %>%
+    mutate(brew = str_replace(brew,"\\(e.g.*","")) %>%
+    mutate(brew = str_replace(brew,"brewing machine", "brewing mach."))
+
+
+#Reorder by popularity
+coffee_brew_percent_n <- coffee_brew_percent %>% 
+    group_by(brew) %>%
+    summarise(n = sum(n)) %>% 
+    arrange(desc(n))
+
+coffee_brew_percent <- coffee_brew_percent %>% mutate(brew = fct_relevel(brew,coffee_brew_percent_n$brew))
+```
+
+
+And plotting! The most popular brewing methods are by far the pourover and an espresso, which are more used the more experienced the user is. Novices brew their coffee this way as well but are more likely to use an automated method, such as a brewing machine or pod machine.
+
+
+It is surprinsing to see the Moka pot being so unpopular, but this may a difference in brewing method between the US and Europe, as I feel the results would be quite different if the survey was in Europe.
+
+```{r}
+#| fig.height=8
+p <- coffee_brew_percent %>% 
+    ggplot(aes( y = percent,
+                x = exp,
+                fill = exp)) + 
+        geom_col(position = position_dodge()) +
+        facet_wrap(~brew) +
+        theme_bw(base_size = 13) +
+        labs(title = "The main ways of brewing coffee",
+        subtitle = "Percentage of people brewing their coffee at home with a specific method\n(choosing more than one was allowed)",
+        x = element_blank(),
+        y = "Percentage") +
+        theme(legend.position = "top",
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.x = element_blank()) +
+        guides(fill=guide_legend("Grouped by expertise level")) +
+        scale_fill_manual(values = c("#cc4c02", "#fe9929", "#fed98e"))
+p
+```
+
+
+
+
+```{r}
+#| echo: false
+#| output: false
+df <- coffee_survey %>% mutate(strength = case_match(strength,
+    "Weak" ~ 1,
+    "Somewhat light" ~ 2,
+    "Medium" ~ 3,
+    "Somewhat strong" ~ 4,
+    "Very strong" ~ 5,
+    ))
+
+
+avg_strength <- df %>% select(c(age,strength)) %>% na.omit() %>% group_by(age) %>% summarise(average_strength = mean(strength), std_dev = sd(strength))    
+
+
+
+p <- avg_strength %>% ggplot(aes(x = age, y = average_strength)) + geom_point() + theme_minimal() + geom_errorbar(aes(ymin = average_strength - std_dev, ymax = average_strength + std_dev))
+
+p
+
+```
+
+
+```{r}
+#| echo: false
+#| output: false
+coffee_survey %>% select(c(expertise,know_source)) %>% na.omit() %>% ggplot(aes(x = expertise , fill = know_source)) + geom_bar(position = "fill")
+```
