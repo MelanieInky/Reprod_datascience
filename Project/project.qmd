@@ -1,0 +1,157 @@
+---
+title: "Project report. Parametric modeling"
+bibliography: references.bib
+format:
+  html:
+    code-fold: true
+    embed-resources: true
+date: today
+author:
+    - Mélanie FOURNIER
+---
+
+# Carbon uptake project
+
+In this project, we have a look at time series modeling. I chose this project for the time series aspect, as I will be taking the course in the second part of the semester. 
+
+In this project, we work with meterological data from the [Integrated Carbon Observation System (ICOS)](https://www.icos-sweden.se/). The meterogical station where the data(@https://hdl.handle.net/11676/G6RuDZf-v0-Kym20ToJrmwf5 and @https://hdl.handle.net/11676/XESY-JxtNIMxXKat66tMUD9y)  is gathered is the Norunda station, located north of Uppsala, Sweden. From this station, variables such as temperature, radiation or precipitations are sampled every half hour. Then, the fluxes are calculated variables, which we can use as target variable in this project.
+
+The target variable is chosen to be the Net Ecosystem Exchange, which measure TODO
+
+
+
+
+# Preparing the data
+
+The data we have is collected every half hour, but we are interested in modeling monthly fluxes, so the data has to be summarised, somehow.
+
+
+First, let us load the data. 
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+```
+
+
+```{r}
+quarto <- FALSE
+if(quarto){
+    fluxes <- read.csv("ISOCETC_SE-Nor_FLUXES_L2.csv")
+    meteo <- read.csv("ISOCETC_SE-Nor_METEO_L2.csv")
+} else{
+    fluxes <- read.csv("Project/ICOSETC_SE-Nor_FLUXES_L2.csv")
+    meteo <- read.csv("Project/ICOSETC_SE-Nor_METEO_L2.csv")
+}
+
+
+```
+
+The NA values are set to -9999 in the data. For practical reason, these are replaced with NAs. 
+
+```{r}
+meteo2 <- meteo %>% mutate(across(everything(), ~replace(., . == -9999, NA)))
+fluxes2 <- fluxes %>% mutate(across(everything(), ~replace(., . == -9999, NA)))
+```
+
+We select only the timestamp at the start and the NEE for the flux before joining it to the main dataframe for further processing.
+```{r}
+fluxes_reduced <- fluxes2 %>% select(c(TIMESTAMP_START, NEE))
+```
+
+
+
+
+```{r}
+df <- meteo2 %>% inner_join(fluxes_reduced, by = join_by(TIMESTAMP_START))
+```
+
+Then, in order to have a more human readable datetime format, the timestamps are converted to a date-time format. We also create another variable that only gives the month and the year as information for grouping purposes.
+
+
+
+In addition, looking at the data directly reveals that while the first date is the first of January 2018, data is only available from the the middle of November 2018 onward. We thus filter the data to start on the first of December 2018 to only get complete months.
+
+```{r}
+df <- df %>% mutate(TIMESTAMP_START = ymd_hm(TIMESTAMP_START)) %>%
+    mutate(month = floor_date(TIMESTAMP_START, "month"))
+
+df <- df %>% filter(month > "2018-12-01")
+```
+
+
+This allows us to work with the first visualisation, of monthly Net Ecosystem Exchange. Based on the available metadata, Net Ecosystem Exchange is calculated in $molCo2 m^{-2} s^{-1}$.
+
+There are a quite a lot of measurement that are not available. For this reason, it convenes to impute these missing value by the average NEE during the month.
+
+
+
+
+
+
+```{r}
+avg.NEE <- df %>% select(c(month,NEE))  %>% na.omit() %>% group_by(month) %>% summarise(avg.NEE = mean(NEE))
+
+df <- df %>% full_join(avg.NEE , by = join_by(month))
+
+cum.NEE <- df %>% group_by(month) %>% summarise(monthlyNEE = sum(avg.NEE)* 30)
+```
+
+
+```{r}
+#| fig-cap: Monthly NEE over time. The NEE is high during autumn and low during spring. A slight upward trend is visible.
+#| echo: false
+
+cum.NEE %>% ggplot(aes(x = month, y = monthlyNEE)) + geom_line() +
+    theme_bw() + xlab("Date") + ylab("Monthly NEE flux (molCO2 / m²)") +
+    scale_x_datetime(date_breaks= "6 months")
+
+```
+
+
+While cumulative values make sense to measure for fluxes. It does not make sense to do so for non fluxes. For this reasons, radiation, soil and temperature measurements must be summarized. 
+
+
+```{r}
+df_month <- df %>% group_by(month) %>% summarise_all(list(~ mean(.x,na.rm = TRUE),~ max(.x,na.rm = TRUE)))
+```
+
+
+Only get the varialbe we are interested in...
+```{r}
+df_month2 <- df_month %>% select(c(starts_with("TS"),starts_with("TA")))
+```
+
+
+# Misc - Visualization of the missing values
+
+The missing values in NEE were imputed, but before imputing, it was interesting to check if there was a pattern in the missing values or if it was truly random. For example, some sensors may undergo maintenance at regular intervals. For these cases, it would not be appropriate to simply impute the way it was done during the project, as this would most likely bias the results.
+
+
+```{r}
+test <- fluxes_reduced %>% filter(is.na(NEE)) %>% mutate(datetime = ymd_hm(TIMESTAMP_START))
+
+
+```
+
+
+```{r}
+#| fig-cap: There does not seem to be a time of the day where values are missing in particular.
+test %>% group_by(hour = hour(datetime)) %>% count() %>%
+    ggplot(aes(x = hour, y = n)) + geom_col()
+```
+
+
+```{r}
+test %>% group_by(week = week(datetime)) %>% count() %>%
+    ggplot(aes(x = week, y = n)) + geom_col()
+```
+
+```{r}
+test %>% group_by(month = month(datetime)) %>% count() %>%
+    ggplot(aes(x = month, y = n)) + geom_col()
+```
+
+There is less missing values during the later months, but from a purely subjective viewpoint, this is not enough to consider this a pattern.
