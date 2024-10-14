@@ -26,21 +26,24 @@ The target variable is chosen to be the Net Ecosystem Exchange, which measure TO
 The data we have is collected every half hour, but we are interested in modeling monthly fluxes, so the data has to be summarised, somehow.
 
 
+## Loading the data 
 First, let us load the data. 
 
 ```{r}
+#| output: false
 library(dplyr)
 library(ggplot2)
 library(lubridate)
+library(tidyr)
 
 ```
 
 
 ```{r}
-quarto <- FALSE
+quarto <- TRUE
 if(quarto){
-    fluxes <- read.csv("ISOCETC_SE-Nor_FLUXES_L2.csv")
-    meteo <- read.csv("ISOCETC_SE-Nor_METEO_L2.csv")
+    fluxes <- read.csv("ICOSETC_SE-Nor_FLUXES_L2.csv")
+    meteo <- read.csv("ICOSETC_SE-Nor_METEO_L2.csv")
 } else{
     fluxes <- read.csv("Project/ICOSETC_SE-Nor_FLUXES_L2.csv")
     meteo <- read.csv("Project/ICOSETC_SE-Nor_METEO_L2.csv")
@@ -71,7 +74,6 @@ df <- meteo2 %>% inner_join(fluxes_reduced, by = join_by(TIMESTAMP_START))
 Then, in order to have a more human readable datetime format, the timestamps are converted to a date-time format. We also create another variable that only gives the month and the year as information for grouping purposes.
 
 
-
 In addition, looking at the data directly reveals that while the first date is the first of January 2018, data is only available from the the middle of November 2018 onward. We thus filter the data to start on the first of December 2018 to only get complete months.
 
 ```{r}
@@ -81,8 +83,9 @@ df <- df %>% mutate(TIMESTAMP_START = ymd_hm(TIMESTAMP_START)) %>%
 df <- df %>% filter(month > "2018-12-01")
 ```
 
+## From hourly data to monthly
 
-This allows us to work with the first visualisation, of monthly Net Ecosystem Exchange. Based on the available metadata, Net Ecosystem Exchange is calculated in $molCo2 m^{-2} s^{-1}$.
+This allows us to work with the first visualisation, of monthly Net Ecosystem Exchange. Based on the available metadata, Net Ecosystem Exchange is calculated in $molCo2 m^{-2} s^{-1}$. 
 
 There are a quite a lot of measurement that are not available. For this reason, it convenes to impute these missing value by the average NEE during the month.
 
@@ -96,33 +99,94 @@ avg.NEE <- df %>% select(c(month,NEE))  %>% na.omit() %>% group_by(month) %>% su
 
 df <- df %>% full_join(avg.NEE , by = join_by(month))
 
-cum.NEE <- df %>% group_by(month) %>% summarise(monthlyNEE = sum(avg.NEE)* 30)
+cum.NEE <- df %>% group_by(month) %>% summarise(monthlyNEE = sum(avg.NEE*30*60))
 ```
 
 
 ```{r}
-#| fig-cap: Monthly NEE over time. The NEE is high during autumn and low during spring. A slight upward trend is visible.
+#| fig-cap: Monthly NEE over time. The NEE is high during autumn and low during spring. A slight upward trend is visible. The vertical line marks the date where part of the forest surronding the site was cut down. 
 #| echo: false
 
 cum.NEE %>% ggplot(aes(x = month, y = monthlyNEE)) + geom_line() +
-    theme_bw() + xlab("Date") + ylab("Monthly NEE flux (molCO2 / m²)") +
-    scale_x_datetime(date_breaks= "6 months")
+    theme_bw() + xlab("Date") + ylab("Monthly NEE flux (molCO2 / m² / month)") +
+    scale_x_datetime(date_breaks= "6 months", date_labels = "%b %Y ") +
+    theme(axis.text.x = element_text(angle = 90)) +
+    geom_vline(xintercept = as_datetime("2022-11-24"),linetype = "dashed")
 
 ```
 
 
-While cumulative values make sense to measure for fluxes. It does not make sense to do so for non fluxes. For this reasons, radiation, soil and temperature measurements must be summarized. 
+While cumulative values make sense to measure for fluxes. It does not make sense to do so for non fluxes. For this reasons, radiation, soil and temperature measurements must be summarized. This is done with the usual summary variable such as mean, median, max, min, and other quantiles. Other summary variable of interest would number of days type variable, such as number of days with rainfall, or with snow on the soil.
+
+
+In order to get the variables we will use as predictors, we remove the column we don't need first, and other columns with too many missing datapoints. We also remove any variable that quantify the uncertainties of other measurements, as uncertainties should be smoother out by the summarizing functions.
 
 
 ```{r}
-df_month <- df %>% group_by(month) %>% summarise_all(list(~ mean(.x,na.rm = TRUE),~ max(.x,na.rm = TRUE)))
+X <- df %>% 
+    select(!c(TIMESTAMP_START,TIMESTAMP_END,avg.NEE,NEE,WTD,WTD_SD,VPD_3,RH_3,ALB)) %>% select(!c(ends_with("_N", ignore.case = TRUE),ends_with("_SD", ignore.case = TRUE)))
 ```
 
 
-Only get the varialbe we are interested in...
+
 ```{r}
-df_month2 <- df_month %>% select(c(starts_with("TS"),starts_with("TA")))
+#| output: false
+X_monthly <- X %>% group_by(month) %>% 
+    summarise_all(list(
+                    ~ mean(.x,na.rm = TRUE),
+                    ~ max(.x,na.rm = TRUE),
+                    ~ min(.x,na.rm = TRUE),
+                    ~ sd(.x, na.rm = TRUE),
+                    ~ median(.x, na.rm = TRUE)))
 ```
+
+
+Additionally, we decide to remove any remaining column where there still are missing values. This mostly gets rid of variable related to pressure, humidity, and snow fall.
+
+
+```{r}
+X_monthly2 <- X_monthly %>% select_if(~ !any(is.na(.)) & !any(is.infinite(.)))
+```
+
+
+```{r}
+#| fig-cap: Air temperature at the first position in the Norunda research station. 
+air.temp <-X_monthly2 %>% select(c(month,starts_with("TA_1_") & !ends_with("_sd")))
+
+air.temp %>% 
+    pivot_longer(
+        cols = !month,
+        names_to = "Temperature",
+        values_to = "Air.Temperature") %>%
+    ggplot(aes(x = month, y = Air.Temperature, color = Temperature)) + geom_line() +  scale_x_datetime(date_breaks= "6 months", date_labels = "%b %Y ") +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 90)) +
+    xlab(element_blank()) + ylab("Air temperature") +
+    scale_color_discrete(labels = c("Maximum","Mean","Median","Minimum"))
+
+
+```
+
+# Training-validation split.
+
+Since we are working with correlated data, doing a random training-validation set split would lead to some significant bias as the validation data would look too much like the training one. The usual time series equivalent to cross validation would be to do some evaluation on a rolling forecasting origin@Hyndman_Athanasopoulos_2021, but this pose an issue regarding data leakage, as we will be looking to do dimensionality reduction later on. 
+
+Another issue is that the forest was cut down in the end of 2023, so setting the training-validation boundary prior to that date would lead to a model that cannot account for this change. 
+
+For this reason, we keep only the last two months as validation data. 
+
+```{r}
+X.train <- X_monthly2 %>% slice_tail(n=-2)
+X.val <- X_monthly2 %>% slice_tail(n = 2)
+```
+
+# Dimensionality reduction.
+
+We end up with a lot more variables than they are month in the observation. In fact, there are significantly more variables than sample, leading to underdefined least square problem were we to use linear regression. 
+
+A standard approach would be to use PCA and select only a few principal components as predictors, which would work, but we would loose interpretability in the process. 
+
+
 
 
 # Misc - Visualization of the missing values
