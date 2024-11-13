@@ -16,17 +16,21 @@ In this project, we have a look at time series modeling. I chose this project fo
 
 In this project, we work with meterological data from the [Integrated Carbon Observation System (ICOS)](https://www.icos-sweden.se/). The meterogical station where the data(@https://hdl.handle.net/11676/G6RuDZf-v0-Kym20ToJrmwf5 and @https://hdl.handle.net/11676/XESY-JxtNIMxXKat66tMUD9y)  is gathered is the Norunda station, located north of Uppsala, Sweden. From this station, variables such as temperature, radiation or precipitations are sampled every half hour. Then, the fluxes are calculated variables, which we can use as target variable in this project.
 
-The target variable is chosen to be the Net Ecosystem Exchange, which measure TODO
+The target variable is chosen to be the Net Ecosystem Exchang(NEE), which is the net exchange of Co2 between the atmosphere and the soil. A negative NEE means that the earth absorbed CO2 from the atmosphere, and inversely for a positive NEE.
+
 
 
 
 
 # Preparing the data
 
-The data we have is collected every half hour, but we are interested in modeling monthly fluxes, so the data has to be summarised, somehow.
+The data is time series data that is collected every half hour, and most of the data is missing until december of 2018. We first need to prepare the data.
+
+There are two dataset, one is called meteo, the other flux. We want to use the variable in the meteo file as predictors for the NEE, situated in the flux file.
 
 
 ## Loading the data 
+
 First, let us load the data. 
 
 ```{r}
@@ -35,7 +39,7 @@ library(dplyr)
 library(ggplot2)
 library(lubridate)
 library(tidyr)
-
+library(forecast)
 ```
 
 
@@ -48,7 +52,6 @@ if(quarto){
     fluxes <- read.csv("Project/ICOSETC_SE-Nor_FLUXES_L2.csv")
     meteo <- read.csv("Project/ICOSETC_SE-Nor_METEO_L2.csv")
 }
-
 
 ```
 
@@ -63,8 +66,6 @@ We select only the timestamp at the start and the NEE for the flux before joinin
 ```{r}
 fluxes_reduced <- fluxes2 %>% select(c(TIMESTAMP_START, NEE))
 ```
-
-
 
 
 ```{r}
@@ -83,9 +84,65 @@ df <- df %>% mutate(TIMESTAMP_START = ymd_hm(TIMESTAMP_START)) %>%
 df <- df %>% filter(month > "2018-12-01")
 ```
 
+
+## Removing highly correlated variables
+
+The stations has 14 differents measurements of air temperature done at different altitude level, which have the name "TA_*". Each of these measurements are extremely correlated to each other with correlation of 0.98 at the mimimum. For this reason, only one of the variable is kept, namely the one which is not part of the vertical profile.
+
+This reasoning is also repeated accross all variable where multiple measurements are available. Some of them have different amount of missing data, so we also elect to keep the measurements with the least amount of missing data in these cases.
+
+
+The soil temperature also have an altitude profile measurements, which are done with multiple sensor. The standard deviation of such measurements is also available. We select the measurements which have the lowest standard deviation on average, that is TS_5.
+
+Next is the GD variable, which corresponds to the soil heat flux. There are two different measurements and the second one is the one with the least missing values, so it is the one we keep. 
+
+Then, we have the soil water content (SWC) variable for which there are 4 levels. The first level uses 4 different sensors, while the other only use two. It is also the level with the least amount of missing data. For this reason, this is the level we keep.
+
+Relative humidity (RH) also has measurements. We select the one with the least amount of missing data.
+
+Shortwave incoming radiation (SW_IN) has two measurements, the second one having the least amount of missing data.
+
+Vapour pressure deficit (VPD) also has multiple measurements, the second of which has the least amount of missing data.
+
+Wind direction can also be removed, as it is not very relevant for the linear models we want to use to use wind direction as a numerical value. 
+
+
+```{r}
+#| output: false
+#Command to get the correlation, for reproducibility
+air_temp <- df %>% select(starts_with("TA")) %>% na.omit()
+cor(air_temp)
+```
+
+```{r}
+df.reduced <- df %>% select(!starts_with("TA_")) #Remove the altitude profile part
+
+soil_temp <- df.reduced %>% select("TS_5")
+df.reduced <- df.reduced %>% select(!starts_with("TS")) %>% mutate("TS" = soil_temp$TS_5)
+
+soil.heatflux <- df.reduced %>% select("G_2")
+df.reduced <- df.reduced %>% select(!starts_with("G")) %>% mutate("G" = soil.heatflux$G_2)
+
+soil.wc <- df.reduced %>% select("SWC_1")
+df.reduced <- df.reduced %>% select(!starts_with("SWC")) %>% mutate("SWC" = soil.wc$SWC_1)
+
+rh <- df.reduced %>% select("RH_2")
+df.reduced <- df.reduced %>% select(!starts_with("RH")) %>% mutate("RH" = rh$RH_2)
+
+swin <- df.reduced %>% select("SW_IN_2")
+df.reduced <- df.reduced %>% select(!starts_with("SW_IN")) %>% mutate("SW_IN" = swin$SW_IN_2)
+
+vpd <- df.reduced %>% select("VPD_2") 
+df.reduced <- df.reduced %>% select(!starts_with("VPD")) %>% mutate("VPD" = vpd$VPD_2)
+
+df.reduced <- df.reduced %>% select(!WD)
+```
+
+
+
 ## From hourly data to monthly
 
-This allows us to work with the first visualisation, of monthly Net Ecosystem Exchange. Based on the available metadata, Net Ecosystem Exchange is calculated in $molCo2 m^{-2} s^{-1}$. 
+This allows us to work with the first visualisation, of monthly Net Ecosystem Exchange. Based on the available metadata, Net Ecosystem Exchange is calculated in $molCo2 m^{-2} s^{-1}$. Using this, we can compute the cumulative NEE over each months. 
 
 There are a quite a lot of measurement that are not available. For this reason, it convenes to impute these missing value by the average NEE during the month.
 
@@ -95,11 +152,12 @@ There are a quite a lot of measurement that are not available. For this reason, 
 
 
 ```{r}
-avg.NEE <- df %>% select(c(month,NEE))  %>% na.omit() %>% group_by(month) %>% summarise(avg.NEE = mean(NEE))
+avg.NEE <- df.reduced %>% select(c(month,NEE))  %>% na.omit() %>% group_by(month) %>% summarise(avg.NEE = mean(NEE))
 
-df <- df %>% full_join(avg.NEE , by = join_by(month))
+df.reduced2 <- df.reduced %>% full_join(avg.NEE , by = join_by(month))
 
-cum.NEE <- df %>% group_by(month) %>% summarise(monthlyNEE = sum(avg.NEE*30*60))
+#For numerical stability reasons, divide by 1e6 
+cum.NEE <- df.reduced2 %>% group_by(month) %>% summarise(monthlyNEE = sum(avg.NEE*30*60/1e6))
 ```
 
 
@@ -107,7 +165,7 @@ cum.NEE <- df %>% group_by(month) %>% summarise(monthlyNEE = sum(avg.NEE*30*60))
 #| fig-cap: Monthly NEE over time. The NEE is high during autumn and low during spring. A slight upward trend is visible. The vertical line marks the date where part of the forest surronding the site was cut down. 
 #| echo: false
 
-cum.NEE %>% ggplot(aes(x = month, y = monthlyNEE)) + geom_line() +
+cum.NEE %>% ggplot(aes(x = month, y = monthlyNEE*1e6)) + geom_line() +
     theme_bw() + xlab("Date") + ylab("Monthly NEE flux (molCO2 / m² / month)") +
     scale_x_datetime(date_breaks= "6 months", date_labels = "%b %Y ") +
     theme(axis.text.x = element_text(angle = 90)) +
@@ -119,12 +177,11 @@ cum.NEE %>% ggplot(aes(x = month, y = monthlyNEE)) + geom_line() +
 While cumulative values make sense to measure for fluxes. It does not make sense to do so for non fluxes. For this reasons, radiation, soil and temperature measurements must be summarized. This is done with the usual summary variable such as mean, median, max, min, and other quantiles. Other summary variable of interest would number of days type variable, such as number of days with rainfall, or with snow on the soil.
 
 
-In order to get the variables we will use as predictors, we remove the column we don't need first, and other columns with too many missing datapoints. We also remove any variable that quantify the uncertainties of other measurements, as uncertainties should be smoother out by the summarizing functions.
-
+In order to get the variables we will use as predictors, we remove the column we don't need first, and other columns with too many missing datapoints.
 
 ```{r}
-X <- df %>% 
-    select(!c(TIMESTAMP_START,TIMESTAMP_END,avg.NEE,NEE,WTD,WTD_SD,VPD_3,RH_3,ALB)) %>% select(!c(ends_with("_N", ignore.case = TRUE),ends_with("_SD", ignore.case = TRUE)))
+X <- df.reduced %>% 
+    select(!c(TIMESTAMP_START,TIMESTAMP_END,NEE,WTD,WTD_SD,ALB)) %>% select(!c(ends_with("_N", ignore.case = TRUE),ends_with("_SD", ignore.case = TRUE)))
 ```
 
 
@@ -136,8 +193,7 @@ X_monthly <- X %>% group_by(month) %>%
                     ~ mean(.x,na.rm = TRUE),
                     ~ max(.x,na.rm = TRUE),
                     ~ min(.x,na.rm = TRUE),
-                    ~ sd(.x, na.rm = TRUE),
-                    ~ median(.x, na.rm = TRUE)))
+                    ~ sd(.x, na.rm = TRUE)))
 ```
 
 
@@ -148,10 +204,13 @@ Additionally, we decide to remove any remaining column where there still are mis
 X_monthly2 <- X_monthly %>% select_if(~ !any(is.na(.)) & !any(is.infinite(.)))
 ```
 
+```{r}
+X <- X_monthly2 %>% select(!month)
+```
 
 ```{r}
 #| fig-cap: Air temperature at the first position in the Norunda research station. 
-air.temp <-X_monthly2 %>% select(c(month,starts_with("TA_1_") & !ends_with("_sd")))
+air.temp <-X_monthly2 %>% select(c(month,starts_with("TA"))) %>% select(!TA_sd)
 
 air.temp %>% 
     pivot_longer(
@@ -162,7 +221,7 @@ air.temp %>%
     theme_bw() +
     theme(axis.text.x = element_text(angle = 90)) +
     xlab(element_blank()) + ylab("Air temperature") +
-    scale_color_discrete(labels = c("Maximum","Mean","Median","Minimum"))
+    scale_color_discrete(labels = c("Maximum","Mean","Minimum"))
 
 
 ```
@@ -171,33 +230,273 @@ air.temp %>%
 
 Since we are working with correlated data, doing a random training-validation set split would lead to some significant bias as the validation data would look too much like the training one. The usual time series equivalent to cross validation would be to do some evaluation on a rolling forecasting origin@Hyndman_Athanasopoulos_2021, but this pose an issue regarding data leakage, as we will be looking to do dimensionality reduction later on. 
 
-Another issue is that the forest was cut down in the end of 2023, so setting the training-validation boundary prior to that date would lead to a model that cannot account for this change. 
+Another issue is that the forest was cut down in the end of 2022, so setting the training-validation boundary prior to that date would lead to a model that cannot account for this change. 
 
-For this reason, we keep only the last two months as validation data. 
+For this reason, we keep only the last four months as validation data. These data point will be used to check the model for any obviously bad generalization issue once we have chosen a model.
+
 
 ```{r}
-X.train <- X_monthly2 %>% slice_tail(n=-2)
-X.val <- X_monthly2 %>% slice_tail(n = 2)
+#Useful variables
+n.val <- 4
+n.all <- nrow(X_monthly2)
+n.train <- n.all - n.val
+
+X <- X_monthly2 %>% select(-month)
+X.train <- X%>% slice_tail(n=-n.val)
+X.val <- X %>% slice_tail(n = n.val)
+
+
+y <- cum.NEE %>% select(-month)
+y.train <- y %>% slice_tail(n = -n.val)
+y.val <- y %>% slice_tail(n = n.val)
+
 ```
 
 # Dimensionality reduction.
 
-We end up with a lot more variables than they are month in the observation. In fact, there are significantly more variables than sample, leading to underdefined least square problem were we to use linear regression. 
+We end up with a lot more variables than they are month in the observation. In fact, there are a few more variables than samples, leading to underdefined least square problem were we to use linear regression. 
 
 A standard approach would be to use PCA and select only a few principal components as predictors, which would work, but we would loose interpretability in the process. 
 
+There are only a few variable that we need to remove. We choose to manually do it by identifying set of highly correlated variables and removing one of them, as they provide the same information
+
+```{r}
+high.corr <- cor(X.train) > 0.97
+```
+
+```{r}
+X.train2 <- X.train %>% select(!c(SW_IN_sd,NETRAD_max,PPFD_IN_mean,LW_OUT_mean,NETRAD_mean, PPFD_IN_sd,TS_min,VPD_sd,SW_IN_max, NETRAD_sd, PPFD_OUT_sd))
+high.corr <- cor(X.train2) > 0.97
+```
 
 
+
+# Models
+
+## Additional variable
+
+A variable of interest would be to account for the fact that the forest was cut in the end of 2022.
+
+```{r}
+n.months.before.cut <- nrow(X_monthly2 %>% filter(month < "2022-12-01"))
+forest_status <- c(rep(0,n.months.before.cut),rep(1,n.train-n.months.before.cut))
+
+X.val$forest_status <- 1
+```
+
+## Model with no interaction
+
+The first model is simply to forget that the data comes from a time series, and just consider a linear regression model. We work in both direction, with the upper model being the full model, and the lower model being the intercept only model. Once model is selected based on BIC, the other uses a stricter penalty term on the number of DoF for the regression.
+
+```{r}
+#| output: false
+data <- cbind(X.train2,forest_status, y.train)
+
+model.full <- lm(monthlyNEE ~ ., data = data)
+model.empty <- lm(monthlyNEE ~ 1, data = data)
+
+
+scope <- list("lower" = model.empty, "upper" = model.full)
+model.reduced <- step(model.empty, direction = "both", scope = scope,k = log(n.train))
+model.reduced2 <- step(model.empty, direction = "both", scope = scope,k = 1.35*log(n.train))
+```
+
+The summary of the model are printed below. The first model uses 8 regressors+intercept while the second one uses 6 regressors + intercept. While the usual metrics (AIC,BIC and adjusted R2) all favor the larger model, the reason two models are considered will be shown below
+
+```{r}
+summary(model.reduced)
+summary(model.reduced2)
+```
+
+
+### Residual analysis
+
+
+
+In term of residual analysis, we can first look at the distribution of the residuals with a qqplot. The first model unfortunately does not respect the assumption that the residuals are normally distributed, while the second one looks acceptable.
+
+```{r}
+#| layout-ncol: 2
+#| fig-cap: 
+#|   - "QQ plot of the residuals for the first model (8 regressors)"
+#|   - "QQ plot of the residuals for the second model (6 regressors)"
+
+resid <- model.reduced$residuals
+qqnorm(resid)
+qqline(resid)
+
+resid2 <- model.reduced2$residuals
+qqnorm(resid2)
+qqline(resid2)
+```
+
+Another assumption of the linear model is the assumption that the residuals are independent, and thus are not correlated. In that regards, the first model performs better than the second one. In the first models, there is still quite a bit of correlation left at early lags. In the second model, there is a peak in correlation at lag 12 and 13, indicating some seasonality is left in the data.
+
+
+
+```{r}
+#| layout-row: 2
+#| fig-cap: 
+#|   - "QQ plot of the residuals for the first model (8 regressors)"
+#|   - "QQ plot of the residuals for the second model (6 regressors)"
+
+checkresiduals(model.reduced)
+checkresiduals(model.reduced2)
+```
+
+
+
+## ARIMA model
+
+
+In order to get rid of the autocorrelation of the residuals, we can try to model them as an ARMA process. For the first model, an ARIMA(2,0,0)(0,0,1) model with a seasonality of 12 months is the model retained after some trial and error. For the second one, there was no ARIMA model that yielded satisfying results
+
+
+```{r}
+
+design.matrix <- as.matrix(model.reduced$model %>% select(!monthlyNEE))
+
+season <- list("order" = c(0,0,1),"period" = 12)
+arima.model <- Arima(y.train,xreg = design.matrix, order = c(2,0,0),seasonal = season)
+#arima.model <- arima(y.train,xreg =as.matrix(X.pca.reduced), seasonal = season, order = c(3,0,0))
+summary(arima.model)
+```
+
+### Residual analysis and inverse AR roots
+
+
+The residual analysis is good, the residuals are no longer autocorrelated nothing indicates that they are not normally distributed. A Ljung-Box test is also run with results that are not very conclusive.  The inverse of the roots of the lag polynomials are also checked to be inside the unit circle so the model is stable. 
+
+```{r}
+#| fig-cap: QQ plot for the ARIMA model
+resid.arima <- arima.model$resid
+qqnorm(resid.arima)
+qqline(resid.arima)
+```
+
+
+
+```{r}
+#| fig-cap: Residual plots for the ARIMA model. 
+checkresiduals(arima.model)
+```
+
+```{r}
+#| fig-cap: Inverse root of the ARIMA model coefficients. All the inverse roots are inside the unit circle, so the model is stable. 
+autoplot(arima.model)
+```
+
+
+# Validation
+
+Due to the limited amount of data, the validation set is knowingly chosen to be quite small, so the use of the validation data is limited. We predict the 
+
+```{r}
+#| tbl-cap: Predicted value against label in the validation dataset. The results are not exactly conclusive. 
+pred.model1 <- predict(model.reduced, X.val)
+pred.model2 <- predict(model.reduced2, X.val)
+
+X.val.reduced <- X.val %>% select(forest_status, TA_sd, TS_mean, PA_mean, 
+    SW_IN_mean,G_max,SW_OUT_mean,SW_OUT_max)
+pred.arima <- predict(arima.model, newxreg = X.val.reduced)
+pred <- list(model1 = pred.model1,actual_value = y.val)
+
+pred %>% as.data.frame() %>% knitr::kable()
+
+```
+
+
+The predictions are quite accurate.
+
+
+# Forecasting
+
+In order to forecast, we retrain all the models but with all the data. 
+
+```{r}
+
+forest_status <- c(rep(0,n.months.before.cut),rep(1,n.all-n.months.before.cut))
+X_monthly2$forest_status <- forest_status
+
+X_monthly2_reduced <- 
+#model.reduced$call
+
+data <- cbind(X_monthly2,y)
+model.final <- lm(formula = monthlyNEE ~ forest_status + TA_sd + TS_mean + PA_mean + 
+    SW_IN_mean + G_max + SW_OUT_mean + SW_OUT_max, data = data)
+
+
+design.matrix.final <- as.matrix(model.final$model %>% select(!monthlyNEE))
+arima.model.final <- Arima(y,xreg = design.matrix.final, order = c(2,0,0),seasonal = season)
+```
+
+
+The regressor value also need to be extrapolated. One strategy would be to fit an ARIMA model to each of the regressor except the one with the status of the forest which we know will still be clear cut for the foreseeable future, then use pointwise prediction as a "scenario" for the future. Another approach is to repeat the values of the same month for the last year, and use them as regressor once again. The former approach introduce a lot of additional fitting and may not be the most accurate, while the latter approach has the advantage of having a scenario that we know possible.
+
+
+
+```{r}
+fit.and.predict <- function(variable, n.months){
+    model <- auto.arima(X_monthly2 %>% select(all_of(variable)))
+    pred <- predict(model,n.months)
+    return(as.vector(pred$pred))
+}
+```
+
+```{r}
+#| echo: false
+
+to.add <- c("TA_sd", "TS_mean" , "PA_mean" , 
+    "SW_IN_mean" , "G_max" , "SW_OUT_mean" ,"SW_OUT_max")
+
+n.months.to.predict <- 12
+newdata <- data.frame(forest_status =  rep(1,n.months.to.predict))
+newdata$TA_sd <- fit.and.predict("TA_sd",n.months.to.predict)
+newdata$TS_mean <- fit.and.predict("TS_mean",n.months.to.predict)
+newdata$PA_mean <- fit.and.predict("PA_mean",n.months.to.predict)
+newdata$SW_IN_mean <- fit.and.predict("SW_IN_mean",n.months.to.predict)
+newdata$G_max<- fit.and.predict("G_max",n.months.to.predict)
+newdata$SW_OUT_mean <- fit.and.predict("SW_OUT_mean",n.months.to.predict)
+newdata$SW_OUT_max <- fit.and.predict("SW_OUT_max",n.months.to.predict)
+
+```
+
+```{r}
+#| echo: false
+newdata2 <- data.frame(forest_status =  rep(1,n.months.to.predict))
+newdata2$TA_sd <- X_monthly2$TA_sd[(61-11):61]
+newdata2$TS_mean <- X_monthly2$TS_mean[(61-11):61]
+newdata2$PA_mean <- X_monthly2$PA_mean[(61-11):61]
+newdata2$SW_IN_mean <- X_monthly2$SW_IN_mean[(61-11):61]
+newdata2$G_max<- X_monthly2$G_max[(61-11):61]
+newdata2$SW_OUT_mean <- X_monthly2$SW_OUT_mean[(61-11):61]
+newdata2$SW_OUT_max <- X_monthly2$SW_OUT_max[(61-11):61]
+```
+
+```{r}
+#| fig-cap: 12 months forecast using the arima model, conditional on the values given by the auto arima model for the regressor. 
+future <- forecast(arima.model.final,xreg = as.matrix(newdata))
+autoplot(future)
+```
+
+
+```{r}
+#| fig-cap: 12 months forecast using the arima model, conditional on a repeat of the values of the regressor from the same month last year.
+future <- forecast(arima.model.final,xreg = as.matrix(newdata2))
+autoplot(future)
+```
+
+
+The ARIMA fit scenario is more optimistic and predicts that the earth will absorb some carbon from the atmosphere during the winter-spring months, while the "repeat last year" scenario is less so. Time will tell if any of the two prediction is correct, my guess is on the pessimistic one.
 
 # Misc - Visualization of the missing values
 
 The missing values in NEE were imputed, but before imputing, it was interesting to check if there was a pattern in the missing values or if it was truly random. For example, some sensors may undergo maintenance at regular intervals. For these cases, it would not be appropriate to simply impute the way it was done during the project, as this would most likely bias the results.
 
 
+
 ```{r}
 test <- fluxes_reduced %>% filter(is.na(NEE)) %>% mutate(datetime = ymd_hm(TIMESTAMP_START))
-
-
 ```
 
 
